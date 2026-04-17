@@ -18,7 +18,7 @@ To run:
 python pelletVideoViewer.py
 
 -or, to open a file directly-
-python pelletVideoViewer.py "/Users/plh/research/csp/lab_videos/15708.cine"
+python pelletVideoViewer.py "/research/csp/lab_videos/15708.cine"
 """
 
 import sys
