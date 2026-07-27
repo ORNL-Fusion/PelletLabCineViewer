@@ -7,15 +7,17 @@ This program reads cine files and can:
 4. Output rectangles for further analysis
 
 
-required packages:
+required packages (see README.md for the full environment setup):
 
-pip install -U  napari[all] pycine numpy scipy PyQt5 qtpy magicgui
+pip install -r requirements.txt
 
-Optional (for a menu to apply various filters)
-pip install -U scikit-image napari-skimage
+    -or-
+
+pip install -U napari[all] pycine numpy scipy PyQt5 qtpy magicgui
+pip install -U scikit-image napari-skimage   # optional filter menu
 
 To run:
-python pelletVideoViewer.py
+python code/pelletVideoViewer.py
 
 -or, to open a file directly-
 python pelletVideoViewer.py "/research/csp/lab_videos/15708.cine"
@@ -47,6 +49,20 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QFont
+
+# ── local modules ──────────────────────────────────────────────────────
+# Put this file's directory on sys.path so the sibling modules import
+# cleanly whether the program is started as a script, as `python -m`, or
+# through the `pellet-viewer` console entry point.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+try:
+    from pellet_cylinder import CylinderTab
+except ImportError as _exc:  # the viewer stays usable without the add-on
+    CylinderTab = None
+    print(f"[pelletVideoViewer] Cylinder tab unavailable: {_exc}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -219,6 +235,8 @@ class CineViewerWidget(QWidget):
         tabs.addTab(self._build_measure_tab(), "📐 Measure")
         tabs.addTab(self._build_speed_tab(), "⚡️ Speed")
         tabs.addTab(self._build_polygon_tab(), "🔸 Polygons")
+        if CylinderTab is not None:
+            tabs.addTab(CylinderTab(self.viewer, self.calib), "🧪 Cylinder")
         tabs.addTab(self._build_results_tab(), "📋 Results")
         root.addWidget(tabs)
 
@@ -964,6 +982,10 @@ def launch(cine_path: str | None = None):
     napari.run()
 
 
+def main() -> None:
+    """Console-script entry point (installed as ``pellet-viewer``)."""
+    launch(sys.argv[1] if len(sys.argv) > 1 else None)
+
+
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    launch(path)
+    main()

@@ -205,3 +205,68 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ══════════════════════════════════════════════════════════════
+# Project-specific additions
+# ══════════════════════════════════════════════════════════════
+
+# macOS
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+Icon?
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.directory
+.Trash-*
+.nfs*
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# Lab data — never commit raw video or exported frames
+*.cine
+*.chd
+*.mraw
+*.cih
+*.tif
+*.tiff
+*.avi
+*.mp4
+*.mov
+*.npy
+*.npz
+*.h5
+*.hdf5
+data/
+videos/
+exports/
+
+# Measurement output
+results/
+out/
+
+# pyenv: .python-version IS committed on purpose (see README) so that everyone
+# in the lab builds the environment against the same interpreter.
