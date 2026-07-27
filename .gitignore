@@ -268,5 +268,7 @@ exports/
 results/
 out/
 
+*.DS_Store*
+
 # pyenv: .python-version IS committed on purpose (see README) so that everyone
 # in the lab builds the environment against the same interpreter.
