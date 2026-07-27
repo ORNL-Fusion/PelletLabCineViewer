@@ -5,18 +5,23 @@ pellet_cylinder.py
 A parametric *cylinder* overlay for PelletLabCineViewer (napari).
 
 napari has no built-in "cylinder object with a properties panel", so this module
-builds one: a Shapes layer whose polygon is regenerated from five numbers
+builds one: a Shapes layer holding a wireframe cylinder — two elliptical end
+caps joined by two side lines — regenerated from six numbers
 
-    center (row, col), diameter, length, in-plane angle, out-of-plane tilt
+    center (row, col), diameter, length, in-plane angle, tilt
 
-Because a cylinder viewed in orthographic projection has a silhouette that is a
-rectangle capped by two half-ellipses, the tilt parameter lets you recover the
-*true* length even when the pellet is tipped toward or away from the camera:
+Under orthographic projection a tilted cylinder's silhouette is a rectangle
+capped by two half-ellipses, so the tilt parameter lets you recover the *true*
+length even when the pellet is tipped toward or away from the camera:
 
-    projected length  = L*cos(tilt) + D*sin(tilt)
-    apparent end caps = ellipses with semi-axes (D/2)*sin(tilt) x (D/2)
+    width across the axis = D                      (independent of tilt)
+    projected length      = L*cos(t) + D*|sin(t)|
+    end caps              = ellipses with semi-axes (D/2)*sin(t) along the axis
+                                                    (D/2)        across it
 
-Volume is then pi*(D/2)^2*L in calibrated units, independent of tilt.
+At t = 0 the caps collapse to straight lines and the wireframe becomes a plain
+rectangle, which is the correct edge-on view of a flat-ended pellet.  Volume is
+pi*(D/2)^2*L in calibrated units, independent of tilt.
 
 Usage inside pelletVideoViewer.py
 ---------------------------------
@@ -34,12 +39,12 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 from qtpy.QtWidgets import (
-    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -60,8 +65,8 @@ class CylinderParams:
     diameter: float = 40.0     # px
     length: float = 80.0       # TRUE length along the axis (px)
     angle_deg: float = 0.0     # in-plane rotation of the axis
-    tilt_deg: float = 0.0      # out-of-plane tilt; 0 = axis lies in image plane
-    flat_ends: bool = False    # True -> draw square ends (ignore cap ellipses)
+    tilt_deg: float = 0.0      # tilt out of the image plane; 0 = axis in plane,
+    #                            positive/negative = far end away/toward camera
 
     # ── derived quantities ────────────────────────────────────────────
     @property
@@ -72,30 +77,62 @@ class CylinderParams:
     def projected_length(self) -> float:
         """Tip-to-tip extent of the silhouette along the axis (px)."""
         t = math.radians(self.tilt_deg)
-        return self.length * math.cos(t) + self.diameter * math.sin(t)
+        return self.length * math.cos(t) + self.diameter * abs(math.sin(t))
 
     def volume_px3(self) -> float:
         return math.pi * self.radius**2 * self.length
 
-    def silhouette(self, n_cap: int = 48) -> np.ndarray:
-        """Outline vertices as an (N, 2) array of (row, col) — napari order."""
-        t = math.radians(self.tilt_deg)
-        a = 0.5 * self.length * math.cos(t)          # half projected axis
-        b = 0.0 if self.flat_ends else self.radius * math.sin(t)  # cap bulge
-        r = self.radius
-
-        psi = np.linspace(-math.pi / 2, math.pi / 2, n_cap)
-        # right cap (u = +a side), then left cap, walking around the outline
-        right = np.column_stack((a + b * np.cos(psi), r * np.sin(psi)))
-        left = np.column_stack((-a - b * np.cos(psi), -r * np.sin(psi)))
-        uv = np.vstack((right, left))
-
+    # ── drawing ───────────────────────────────────────────────────────
+    def _to_image(self, uv: np.ndarray) -> np.ndarray:
+        """Local (u along axis, v across) -> image (row, col)."""
         phi = math.radians(self.angle_deg)
         c, s = math.cos(phi), math.sin(phi)
-        # local (u along axis, v across) -> image (col, row)
         col = uv[:, 0] * c - uv[:, 1] * s + self.cx
         row = uv[:, 0] * s + uv[:, 1] * c + self.cy
         return np.column_stack((row, col))
+
+    def caps(self, n: int = 64) -> list[np.ndarray]:
+        """The two end-cap ellipses, as closed vertex loops (row, col)."""
+        t = math.radians(self.tilt_deg)
+        a = 0.5 * self.length * math.cos(t)   # half projected axis
+        b = self.radius * math.sin(t)         # cap semi-axis along the axis
+        r = self.radius
+
+        psi = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+        u = b * np.cos(psi)
+        v = r * np.sin(psi)
+        return [
+            self._to_image(np.column_stack((a + u, v))),
+            self._to_image(np.column_stack((-a + u, v))),
+        ]
+
+    def sides(self) -> list[np.ndarray]:
+        """The two side lines tangent to both caps, as 2-point paths."""
+        t = math.radians(self.tilt_deg)
+        a = 0.5 * self.length * math.cos(t)
+        r = self.radius
+        return [
+            self._to_image(np.array([[a, r], [-a, r]], float)),
+            self._to_image(np.array([[a, -r], [-a, -r]], float)),
+        ]
+
+    def wireframe(self, n: int = 64) -> tuple[list[np.ndarray], list[str]]:
+        """All wireframe pieces plus the matching napari shape types."""
+        caps = self.caps(n)
+        sides = self.sides()
+        return caps + sides, ["polygon", "polygon", "path", "path"]
+
+    def silhouette(self, n_cap: int = 48) -> np.ndarray:
+        """Filled outline (rectangle + half-ellipse caps) as one loop."""
+        t = math.radians(self.tilt_deg)
+        a = 0.5 * self.length * math.cos(t)
+        b = self.radius * abs(math.sin(t))
+        r = self.radius
+
+        psi = np.linspace(-math.pi / 2, math.pi / 2, n_cap)
+        right = np.column_stack((a + b * np.cos(psi), r * np.sin(psi)))
+        left = np.column_stack((-a - b * np.cos(psi), -r * np.sin(psi)))
+        return self._to_image(np.vstack((right, left)))
 
 
 def min_area_rect(points: np.ndarray) -> tuple[np.ndarray, float, float, float]:
@@ -132,37 +169,7 @@ def min_area_rect(points: np.ndarray) -> tuple[np.ndarray, float, float, float]:
         long_side, short_side, ang = w, h, theta
     else:
         long_side, short_side, ang = h, w, theta + math.pi / 2
-    center_rowcol = np.array([ctr[1], ctr[0]])
-    return center_rowcol, long_side, short_side, math.degrees(ang)
-
-
-def auto_fit_frame(image: np.ndarray) -> CylinderParams | None:
-    """Threshold the brightest/darkest blob and return a starting guess."""
-    from skimage.filters import threshold_otsu
-    from skimage.measure import label, regionprops
-
-    img = np.asarray(image, float)
-    if img.ndim == 3:  # RGB
-        img = img.mean(axis=-1)
-    thr = threshold_otsu(img)
-    mask = img > thr
-    if mask.mean() > 0.5:  # pellet is dark on a bright background
-        mask = ~mask
-    lab = label(mask)
-    if lab.max() == 0:
-        return None
-    region = max(regionprops(lab), key=lambda r: r.area)
-    ctr, long_side, short_side, ang = min_area_rect(
-        np.argwhere(lab == region.label)
-    )
-    return CylinderParams(
-        cy=float(ctr[0]),
-        cx=float(ctr[1]),
-        diameter=float(short_side),
-        length=float(long_side),
-        angle_deg=float(ang),
-        tilt_deg=0.0,
-    )
+    return np.array([ctr[1], ctr[0]]), long_side, short_side, math.degrees(ang)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -171,15 +178,14 @@ def auto_fit_frame(image: np.ndarray) -> CylinderParams | None:
 
 
 class CylinderTab(QWidget):
-    """Side-panel tab that drives a live cylinder overlay in napari."""
-
-    LAYER = "Cylinder Fit"
+    """Side-panel tab that drives a live wireframe cylinder in napari."""
 
     def __init__(self, viewer, calib=None, parent=None):
         super().__init__(parent)
         self.viewer = viewer
         self.calib = calib
         self.params = CylinderParams()
+        self._layer_name: str | None = None
         self._updating = False
         self._build_ui()
 
@@ -200,14 +206,29 @@ class CylinderTab(QWidget):
         root = QVBoxLayout(self)
 
         info = QLabel(
-            "Overlay a parametric cylinder and match it to the pellet. "
+            "Overlay a wireframe cylinder and match it to the pellet. "
             "Tilt corrects for foreshortening, so length and volume stay true "
-            "even when the pellet leans toward the camera."
+            "even when the pellet leans toward or away from the camera."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color: #aaa; font-size: 11px;")
         root.addWidget(info)
 
+        # ── layer row ────────────────────────────────────────────────
+        row = QHBoxLayout()
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("Layer name, e.g. Pellet A")
+        row.addWidget(self._name_edit)
+        btn_add = QPushButton("+ Add Cylinder Layer")
+        btn_add.clicked.connect(self._add_cylinder_layer)
+        row.addWidget(btn_add)
+        root.addLayout(row)
+
+        self._layer_label = QLabel("Active layer: none")
+        self._layer_label.setStyleSheet("color: #888; font-size: 10px;")
+        root.addWidget(self._layer_label)
+
+        # ── parameters ───────────────────────────────────────────────
         grp = QGroupBox("Cylinder parameters (px / deg)")
         form = QFormLayout(grp)
         self.s_cy = self._spin(self.params.cy, -1e5, 1e5, 1)
@@ -215,46 +236,34 @@ class CylinderTab(QWidget):
         self.s_dia = self._spin(self.params.diameter, 0.1, 1e5, 1)
         self.s_len = self._spin(self.params.length, 0.1, 1e5, 1)
         self.s_ang = self._spin(self.params.angle_deg, -180, 180, 0.5, "\u00b0")
-        self.s_tilt = self._spin(self.params.tilt_deg, 0, 89, 0.5, "\u00b0")
+        self.s_tilt = self._spin(self.params.tilt_deg, -89, 89, 0.5, "\u00b0")
         form.addRow("Center row (y)", self.s_cy)
         form.addRow("Center col (x)", self.s_cx)
         form.addRow("Diameter (width)", self.s_dia)
         form.addRow("Length (true)", self.s_len)
         form.addRow("In-plane rotation", self.s_ang)
-        form.addRow("Tilt out of plane", self.s_tilt)
-        self.cb_flat = QCheckBox("Draw flat ends (no cap ellipses)")
-        self.cb_flat.stateChanged.connect(self._on_param_changed)
-        form.addRow(self.cb_flat)
+        form.addRow("Tilt", self.s_tilt)
         root.addWidget(grp)
 
         row = QHBoxLayout()
-        b_show = QPushButton("Show / Update overlay")
+        b_show = QPushButton("Update overlay")
         b_show.clicked.connect(self._redraw)
-        b_auto = QPushButton("Auto-fit frame")
-        b_auto.clicked.connect(self._auto_fit)
         b_from = QPushButton("Fit from selected shape")
         b_from.clicked.connect(self._fit_from_shape)
-        for b in (b_show, b_auto, b_from):
+        b_copy = QPushButton("\U0001f4cb Copy")
+        b_copy.clicked.connect(self._copy)
+        for b in (b_show, b_from, b_copy):
             row.addWidget(b)
         root.addLayout(row)
 
         self.readout = QTextEdit()
         self.readout.setReadOnly(True)
-        self.readout.setPlaceholderText("Measurements appear here.")
+        self.readout.setPlaceholderText(
+            "Add a cylinder layer to start; measurements appear here."
+        )
         root.addWidget(self.readout)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Density (g/cm\u00b3)"))
-        self.s_rho = QDoubleSpinBox()
-        self.s_rho.setRange(0.0, 30.0)
-        self.s_rho.setDecimals(4)
-        self.s_rho.setValue(0.2)  # solid D2 ~0.2 g/cm^3
-        self.s_rho.valueChanged.connect(self._report)
-        row2.addWidget(self.s_rho)
-        b_copy = QPushButton("\U0001f4cb Copy")
-        b_copy.clicked.connect(self._copy)
-        row2.addWidget(b_copy)
-        root.addLayout(row2)
+        self._report()
 
     # ── state <-> widgets ─────────────────────────────────────────────
 
@@ -266,7 +275,6 @@ class CylinderTab(QWidget):
             length=self.s_len.value(),
             angle_deg=self.s_ang.value(),
             tilt_deg=self.s_tilt.value(),
-            flat_ends=self.cb_flat.isChecked(),
         )
 
     def _write_widgets(self, p: CylinderParams):
@@ -278,7 +286,6 @@ class CylinderTab(QWidget):
             self.s_len.setValue(p.length)
             self.s_ang.setValue(p.angle_deg)
             self.s_tilt.setValue(p.tilt_deg)
-            self.cb_flat.setChecked(p.flat_ends)
         finally:
             self._updating = False
         self.params = p
@@ -291,33 +298,57 @@ class CylinderTab(QWidget):
 
     # ── napari layer ──────────────────────────────────────────────────
 
-    def _layer(self):
-        if self.LAYER in self.viewer.layers:
-            return self.viewer.layers[self.LAYER]
-        return self.viewer.add_shapes(
-            name=self.LAYER,
+    def _next_name(self) -> str:
+        existing = {layer.name for layer in self.viewer.layers}
+        i = 1
+        while f"Cylinder {i}" in existing:
+            i += 1
+        return f"Cylinder {i}"
+
+    def _add_cylinder_layer(self):
+        """Create a fresh Shapes layer and make it the active cylinder."""
+        name = self._name_edit.text().strip() or self._next_name()
+        layer = self.viewer.add_shapes(
+            name=name,
             edge_color="#00ff88",
             edge_width=2,
             face_color="transparent",
             opacity=0.9,
         )
+        self._layer_name = layer.name  # napari may de-duplicate the name
+        self._name_edit.clear()
+        self.viewer.layers.selection.active = layer
+
+        # start centred on the current field of view so it is easy to find
+        try:
+            cy, cx = (float(v) for v in self.viewer.camera.center[-2:])
+            self._write_widgets(replace(self.params, cy=cy, cx=cx))
+        except Exception:
+            pass
+
+        self._redraw()
+
+    def _active_layer(self):
+        if self._layer_name and self._layer_name in self.viewer.layers:
+            return self.viewer.layers[self._layer_name]
+        return None
 
     def _redraw(self):
-        p = self.params
-        layer = self._layer()
+        layer = self._active_layer()
+        if layer is None:
+            self._layer_label.setText("Active layer: none")
+            self._report(note="No cylinder layer — click '+ Add Cylinder Layer'.")
+            return
+
+        self._layer_label.setText(f"Active layer: {layer.name}")
+        shapes, kinds = self.params.wireframe()
         layer.data = []
-        layer.add_polygons(p.silhouette())
-        # axis line, useful for eyeballing the alignment
-        phi = math.radians(p.angle_deg)
-        half = 0.5 * p.length * math.cos(math.radians(p.tilt_deg))
-        d = np.array([math.sin(phi), math.cos(phi)])  # (row, col)
-        c = np.array([p.cy, p.cx])
-        layer.add_paths(np.vstack((c - half * d, c + half * d)))
+        layer.add(shapes, shape_type=kinds)
         layer.mode = "pan_zoom"
         self._report()
 
     def _fit_from_shape(self):
-        """Take the selected shape (any type) and back out the parameters."""
+        """Take a shape you have drawn and back out the parameters."""
         from napari.layers import Shapes
 
         for layer in self.viewer.layers.selection:
@@ -325,44 +356,28 @@ class CylinderTab(QWidget):
                 idx = next(iter(layer.selected_data), 0)
                 verts = np.asarray(layer.data[idx])[:, -2:]
                 ctr, long_side, short_side, ang = min_area_rect(verts)
-                p = replace(
-                    self.params,
-                    cy=float(ctr[0]),
-                    cx=float(ctr[1]),
-                    diameter=float(short_side),
-                    length=float(long_side),
-                    angle_deg=float(ang),
+                self._write_widgets(
+                    replace(
+                        self.params,
+                        cy=float(ctr[0]),
+                        cx=float(ctr[1]),
+                        diameter=float(short_side),
+                        length=float(long_side),
+                        angle_deg=float(ang),
+                    )
                 )
-                self._write_widgets(p)
                 self._redraw()
                 return
-        self.readout.append("No shape selected.")
-
-    def _auto_fit(self):
-        for layer in self.viewer.layers:
-            if layer.__class__.__name__ == "Image":
-                frame = np.asarray(layer.data)
-                if frame.ndim >= 3 and frame.shape[0] > 4:
-                    frame = frame[int(self.viewer.dims.current_step[0])]
-                guess = auto_fit_frame(frame)
-                if guess is None:
-                    self.readout.append("Auto-fit found nothing.")
-                    return
-                guess.tilt_deg = self.params.tilt_deg
-                guess.flat_ends = self.params.flat_ends
-                self._write_widgets(guess)
-                self._redraw()
-                return
-        self.readout.append("No image layer found.")
+        self._report(note="Select a shape in a Shapes layer first.")
 
     # ── reporting ─────────────────────────────────────────────────────
 
-    def _report(self):
+    def _report(self, note: str | None = None):
         p = self.params
         lines = [
             "── Cylinder fit ──",
             f"center      : ({p.cy:.1f}, {p.cx:.1f}) px",
-            f"angle/tilt  : {p.angle_deg:.1f}\u00b0 / {p.tilt_deg:.1f}\u00b0",
+            f"angle/tilt  : {p.angle_deg:.1f}\u00b0 / {p.tilt_deg:+.1f}\u00b0",
             f"diameter    : {p.diameter:.2f} px",
             f"length      : {p.length:.2f} px  "
             f"(projected {p.projected_length:.2f} px)",
@@ -376,13 +391,13 @@ class CylinderTab(QWidget):
                 f"length      : {l_m * 1e3:.4f} mm",
                 f"volume      : {v_m3 * 1e9:.4f} mm\u00b3",
             ]
-            rho = self.s_rho.value() * 1000.0  # g/cm^3 -> kg/m^3
-            if rho > 0:
-                lines.append(f"mass @ {self.s_rho.value():g} g/cm\u00b3 : "
-                             f"{v_m3 * rho * 1e6:.4f} mg")
         else:
-            lines.append(f"volume      : {p.volume_px3():.1f} px\u00b3 "
-                         "(calibrate for mm\u00b3)")
+            lines.append(
+                f"volume      : {p.volume_px3():.1f} px\u00b3 "
+                "(calibrate for mm\u00b3)"
+            )
+        if note:
+            lines += ["", note]
         self.readout.setPlainText("\n".join(lines))
 
     def _copy(self):
