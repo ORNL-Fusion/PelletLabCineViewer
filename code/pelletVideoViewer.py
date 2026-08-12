@@ -64,6 +64,12 @@ except ImportError as _exc:  # the viewer stays usable without the add-on
     CylinderTab = None
     print(f"[pelletVideoViewer] Cylinder tab unavailable: {_exc}")
 
+try:
+    from pellet_export import ExportTab
+except ImportError as _exc:
+    ExportTab = None
+    print(f"[pelletVideoViewer] Export tab unavailable: {_exc}")
+
 
 # ═══════════════════════════════════════════════════════════════
 # Cine Loader, Calibration Classes
@@ -236,7 +242,11 @@ class CineViewerWidget(QWidget):
         tabs.addTab(self._build_speed_tab(), "⚡️ Speed")
         tabs.addTab(self._build_polygon_tab(), "🔸 Polygons")
         if CylinderTab is not None:
-            tabs.addTab(CylinderTab(self.viewer, self.calib), "🧪 Cylinder")
+            tabs.addTab(
+                CylinderTab(self.viewer, self.calib, host=self), "🧪 Cylinder"
+            )
+        if ExportTab is not None:
+            tabs.addTab(ExportTab(self.viewer, self.calib, host=self), "🖼 Export")
         tabs.addTab(self._build_results_tab(), "📋 Results")
         root.addWidget(tabs)
 
@@ -633,8 +643,23 @@ class CineViewerWidget(QWidget):
 
     def _connect_viewer_signals(self):
         self.viewer.dims.events.current_step.connect(
-            lambda e: self._update_frame_label()
+            lambda e: self._on_current_step()
         )
+
+    def _on_current_step(self):
+        """Keep the cached frame index in step with the slider.
+
+        The step buttons write ``_current_frame`` themselves, but dragging the
+        napari slider or letting playback run does not go through them, so
+        anything reading the cache would otherwise be stuck on a stale frame.
+        """
+        try:
+            step = self.viewer.dims.current_step
+            if len(step) >= 3:
+                self._current_frame = int(step[0])
+        except Exception:
+            pass
+        self._update_frame_label()
 
     # ──────────────────────────────────────────────────────────────────
     # Calibration

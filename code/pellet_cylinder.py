@@ -39,6 +39,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 from qtpy.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -50,6 +51,30 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:  # the two tabs read the frame and format timestamps the same way
+    from pellet_export import current_frame_index, format_time
+except ImportError:  # keep this module standalone if pellet_export is absent
+
+    def current_frame_index(viewer, host=None) -> int:
+        try:
+            step = viewer.dims.current_step
+            if len(step) >= 3:
+                return int(step[0])
+        except Exception:
+            pass
+        return int(getattr(host, "_current_frame", 0)) if host else 0
+
+    def format_time(frame_idx: int, fps: float) -> str:
+        if not fps or fps <= 0:
+            return f"frame {frame_idx}"
+        t = frame_idx / fps
+        if t < 1e-3:
+            return f"{t * 1e6:.1f} \u00b5s"
+        if t < 1.0:
+            return f"{t * 1e3:.2f} ms"
+        return f"{t:.3f} s"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Geometry (pure numpy — no napari/Qt needed, easy to unit-test)
@@ -67,6 +92,13 @@ class CylinderParams:
     angle_deg: float = 0.0     # in-plane rotation of the axis
     tilt_deg: float = 0.0      # tilt out of the image plane; 0 = axis in plane,
     #                            positive/negative = far end away/toward camera
+
+    # Optional pair of red guide lines, parallel to the cylinder axis but with
+    # their own separation and length — handy as calipers for reading the
+    # pellet's true edges without disturbing the fit.
+    guides: bool = False
+    guide_sep: float = 40.0    # perpendicular distance between the two lines
+    guide_len: float = 80.0    # length of each line, along the axis
 
     # ── derived quantities ────────────────────────────────────────────
     @property
@@ -114,6 +146,15 @@ class CylinderParams:
         return [
             self._to_image(np.array([[a, r], [-a, r]], float)),
             self._to_image(np.array([[a, -r], [-a, -r]], float)),
+        ]
+
+    def guide_lines(self) -> list[np.ndarray]:
+        """The two parallel guide lines, as 2-point paths (row, col)."""
+        a = 0.5 * self.guide_len
+        h = 0.5 * self.guide_sep
+        return [
+            self._to_image(np.array([[a, h], [-a, h]], float)),
+            self._to_image(np.array([[a, -h], [-a, -h]], float)),
         ]
 
     def wireframe(self, n: int = 64) -> tuple[list[np.ndarray], list[str]]:
@@ -180,14 +221,39 @@ def min_area_rect(points: np.ndarray) -> tuple[np.ndarray, float, float, float]:
 class CylinderTab(QWidget):
     """Side-panel tab that drives a live wireframe cylinder in napari."""
 
-    def __init__(self, viewer, calib=None, parent=None):
+    EDGE_COLOR = "#00ff88"   # cylinder wireframe
+    GUIDE_COLOR = "red"      # the optional pair of parallel guide lines
+
+    def __init__(self, viewer, calib=None, host=None, parent=None):
         super().__init__(parent)
         self.viewer = viewer
         self.calib = calib
+        self.host = host          # the CineViewerWidget, for fps / frame index
         self.params = CylinderParams()
         self._layer_name: str | None = None
         self._updating = False
         self._build_ui()
+
+        # keep the frame/time line live as the video is stepped or played
+        try:
+            self.viewer.dims.events.current_step.connect(self._on_frame_changed)
+        except Exception:
+            pass
+
+    def _on_frame_changed(self, event=None):
+        self._report()
+
+    # ── frame / time ──────────────────────────────────────────────────
+
+    def _frame_index(self) -> int:
+        return current_frame_index(self.viewer, self.host)
+
+    def _fps(self) -> float:
+        loader = getattr(self.host, "loader", None) if self.host else None
+        try:
+            return float(getattr(loader, "fps", 0.0) or 0.0)
+        except Exception:
+            return 0.0
 
     # ── UI ────────────────────────────────────────────────────────────
 
@@ -245,6 +311,23 @@ class CylinderTab(QWidget):
         form.addRow("Tilt", self.s_tilt)
         root.addWidget(grp)
 
+        # ── guide lines ──────────────────────────────────────────────
+        gl = QGroupBox("Guide lines (red)")
+        glf = QFormLayout(gl)
+        self.cb_guides = QCheckBox(
+            "Show two lines parallel to the cylinder axis"
+        )
+        self.cb_guides.stateChanged.connect(self._on_param_changed)
+        glf.addRow(self.cb_guides)
+        self.s_gsep = self._spin(self.params.guide_sep, 0.0, 1e5, 1)
+        self.s_glen = self._spin(self.params.guide_len, 0.1, 1e5, 1)
+        glf.addRow("Separation (width)", self.s_gsep)
+        glf.addRow("Length", self.s_glen)
+        b_match = QPushButton("Match to cylinder")
+        b_match.clicked.connect(self._match_guides)
+        glf.addRow(b_match)
+        root.addWidget(gl)
+
         row = QHBoxLayout()
         b_show = QPushButton("Update overlay")
         b_show.clicked.connect(self._redraw)
@@ -275,6 +358,9 @@ class CylinderTab(QWidget):
             length=self.s_len.value(),
             angle_deg=self.s_ang.value(),
             tilt_deg=self.s_tilt.value(),
+            guides=self.cb_guides.isChecked(),
+            guide_sep=self.s_gsep.value(),
+            guide_len=self.s_glen.value(),
         )
 
     def _write_widgets(self, p: CylinderParams):
@@ -286,6 +372,9 @@ class CylinderTab(QWidget):
             self.s_len.setValue(p.length)
             self.s_ang.setValue(p.angle_deg)
             self.s_tilt.setValue(p.tilt_deg)
+            self.cb_guides.setChecked(p.guides)
+            self.s_gsep.setValue(p.guide_sep)
+            self.s_glen.setValue(p.guide_len)
         finally:
             self._updating = False
         self.params = p
@@ -310,7 +399,7 @@ class CylinderTab(QWidget):
         name = self._name_edit.text().strip() or self._next_name()
         layer = self.viewer.add_shapes(
             name=name,
-            edge_color="#00ff88",
+            edge_color=self.EDGE_COLOR,
             edge_width=2,
             face_color="transparent",
             opacity=0.9,
@@ -343,9 +432,28 @@ class CylinderTab(QWidget):
         self._layer_label.setText(f"Active layer: {layer.name}")
         shapes, kinds = self.params.wireframe()
         layer.data = []
-        layer.add(shapes, shape_type=kinds)
+        layer.add(shapes, shape_type=kinds, edge_color=self.EDGE_COLOR)
+        if self.params.guides:
+            guides = self.params.guide_lines()
+            layer.add(
+                guides,
+                shape_type=["path"] * len(guides),
+                edge_color=self.GUIDE_COLOR,
+            )
         layer.mode = "pan_zoom"
         self._report()
+
+    def _match_guides(self):
+        """Snap the guide lines onto the cylinder's current width and extent."""
+        self._write_widgets(
+            replace(
+                self.params,
+                guides=True,
+                guide_sep=self.params.diameter,
+                guide_len=self.params.projected_length,
+            )
+        )
+        self._redraw()
 
     def _fit_from_shape(self):
         """Take a shape you have drawn and back out the parameters."""
@@ -374,8 +482,11 @@ class CylinderTab(QWidget):
 
     def _report(self, note: str | None = None):
         p = self.params
+        idx, fps = self._frame_index(), self._fps()
+        stamp = f"{idx}" if fps <= 0 else f"{idx}  ({format_time(idx, fps)})"
         lines = [
             "── Cylinder fit ──",
+            f"frame       : {stamp}",
             f"center      : ({p.cy:.1f}, {p.cx:.1f}) px",
             f"angle/tilt  : {p.angle_deg:.1f}\u00b0 / {p.tilt_deg:+.1f}\u00b0",
             f"diameter    : {p.diameter:.2f} px",
@@ -396,6 +507,15 @@ class CylinderTab(QWidget):
                 f"volume      : {p.volume_px3():.1f} px\u00b3 "
                 "(calibrate for mm\u00b3)"
             )
+        if p.guides:
+            lines.append(
+                f"guides      : {p.guide_sep:.2f} px apart, {p.guide_len:.2f} px long"
+            )
+            if self.calib is not None and getattr(self.calib, "is_set", False):
+                lines.append(
+                    "guide sep   : "
+                    f"{self.calib.px_to_m(p.guide_sep) * 1e3:.4f} mm"
+                )
         if note:
             lines += ["", note]
         self.readout.setPlainText("\n".join(lines))
